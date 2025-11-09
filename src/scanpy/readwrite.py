@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-import warnings
 from functools import partial
 from pathlib import Path, PurePath
-from typing import TYPE_CHECKING, cast, get_args, overload
+from typing import TYPE_CHECKING, overload
 
 import anndata.utils
 import h5py
@@ -17,8 +16,8 @@ from matplotlib.image import imread
 from packaging.version import Version
 
 from . import logging as logg
-from ._compat import deprecated, old_positionals, pkg_version, warn
-from ._settings import AnnDataFileFormat, settings
+from ._compat import add_note, deprecated, old_positionals, pkg_version
+from ._settings import settings
 from ._utils import _empty
 
 if pkg_version("anndata") >= Version("0.11.0rc2"):
@@ -30,7 +29,6 @@ if pkg_version("anndata") >= Version("0.11.0rc2"):
         read_loom,
         read_mtx,
         read_text,
-        read_zarr,
     )
 else:
     from anndata import (
@@ -41,13 +39,12 @@ else:
         read_loom,
         read_mtx,
         read_text,
-        read_zarr,
     )
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from os import PathLike
-    from typing import IO, Literal
+    from typing import BinaryIO, Literal
 
     from ._utils import Empty
 
@@ -64,7 +61,6 @@ avail_exts = {
     "xlsx",
     "h5",
     "h5ad",
-    "zarr",
     "mtx",
     "mtx.gz",
     "soft.gz",
@@ -72,7 +68,6 @@ avail_exts = {
 } | text_exts
 """Available file formats for reading data. """
 
-assert set(get_args(AnnDataFileFormat)) <= avail_exts
 
 # --------------------------------------------------------------------------------
 # Reading and Writing data files and AnnData objects
@@ -89,7 +84,7 @@ assert set(get_args(AnnDataFileFormat)) <= avail_exts
     "cache_compression",
 )
 def read(
-    filename: PathLike[str] | str,
+    filename: Path | str,
     backed: Literal["r", "r+"] | None = None,
     *,
     sheet: str | None = None,
@@ -176,7 +171,7 @@ def read(
 
 @old_positionals("genome", "gex_only", "backup_url")
 def read_10x_h5(
-    filename: PathLike[str] | str,
+    filename: Path | str,
     *,
     genome: str | None = None,
     gex_only: bool = True,
@@ -226,13 +221,7 @@ def read_10x_h5(
     with h5py.File(str(path), "r") as f:
         v3 = "/matrix" in f
     if v3:
-        with warnings.catch_warnings():
-            if genome or gex_only:
-                # this will be thrown below by “adata.copy()”
-                warnings.filterwarnings(
-                    "ignore", r".*names are not unique", UserWarning
-                )
-            adata = _read_10x_h5(path, _read_v3_10x_h5)
+        adata = _read_10x_h5(path, _read_v3_10x_h5)
         if genome:
             if genome not in adata.var["genome"].values:
                 msg = (
@@ -371,13 +360,13 @@ def _read_legacy_10x_h5(f: h5py.File, genome: str | None) -> AnnData:
 
 @deprecated("Use `squidpy.read.visium` instead.")
 def read_visium(
-    path: PathLike[str] | str,
+    path: Path | str,
     genome: str | None = None,
     *,
     count_file: str = "filtered_feature_bc_matrix.h5",
     library_id: str | None = None,
     load_images: bool | None = True,
-    source_image_path: PathLike[str] | str | None = None,
+    source_image_path: Path | str | None = None,
 ) -> AnnData:
     r"""Read 10x-Genomics-formatted visum dataset.
 
@@ -483,7 +472,7 @@ def read_visium(
                 adata.uns["spatial"][library_id]["images"][res] = imread(
                     str(files[f"{res}_image"])
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: PERF203
                 msg = f"Could not find '{res}_image'"
                 raise OSError(msg) from e
 
@@ -535,7 +524,7 @@ def read_visium(
 
 @old_positionals("var_names", "make_unique", "cache", "cache_compression", "gex_only")
 def read_10x_mtx(
-    path: PathLike[str] | str,
+    path: Path | str,
     *,
     var_names: Literal["gene_symbols", "gene_ids"] = "gene_symbols",
     make_unique: bool = True,
@@ -543,7 +532,6 @@ def read_10x_mtx(
     cache_compression: Literal["gzip", "lzf"] | None | Empty = _empty,
     gex_only: bool = True,
     prefix: str | None = None,
-    compressed: bool = True,
 ) -> AnnData:
     """Read 10x-Genomics-formatted mtx directory.
 
@@ -570,11 +558,6 @@ def read_10x_mtx(
         if the files are named `patientA_matrix.mtx`, `patientA_genes.tsv` and
         `patientA_barcodes.tsv` the prefix is `patientA_`.
         (Default: no prefix)
-    compressed
-        Whether to expect Cell Ranger v3+ files (.mtx, features.tsv, barcodes.tsv)
-        to be gzipped. If True, '.gz' suffix is appended to filenames.
-        Set to False for STARsolo output.
-        Has no effect on legacy (v2-) files.
 
     Returns
     -------
@@ -584,19 +567,15 @@ def read_10x_mtx(
     path = Path(path)
     prefix = "" if prefix is None else prefix
     is_legacy = (path / f"{prefix}genes.tsv").is_file()
-    with warnings.catch_warnings():
-        # this will be thrown below in “adata[:, ...].copy()”
-        warnings.filterwarnings("ignore", r".*names are not unique", UserWarning)
-        adata = _read_10x_mtx(
-            path,
-            var_names=var_names,
-            make_unique=make_unique,
-            cache=cache,
-            cache_compression=cache_compression,
-            prefix=prefix,
-            is_legacy=is_legacy,
-            compressed=compressed,
-        )
+    adata = _read_10x_mtx(
+        path,
+        var_names=var_names,
+        make_unique=make_unique,
+        cache=cache,
+        cache_compression=cache_compression,
+        prefix=prefix,
+        is_legacy=is_legacy,
+    )
     if is_legacy or not gex_only:
         return adata
     gex_rows = adata.var["feature_types"] == "Gene Expression"
@@ -612,11 +591,9 @@ def _read_10x_mtx(
     cache_compression: Literal["gzip", "lzf"] | None | Empty = _empty,
     prefix: str = "",
     is_legacy: bool,
-    compressed: bool = True,
 ) -> AnnData:
     """Read mex from output from Cell Ranger v2- or v3+."""
-    # Only append .gz if not a legacy file AND compression is requested
-    suffix = "" if is_legacy else (".gz" if compressed else "")
+    suffix = "" if is_legacy else ".gz"
     adata = read(
         path / f"{prefix}matrix.mtx{suffix}",
         cache=cache,
@@ -627,20 +604,33 @@ def _read_10x_mtx(
         header=None,
         sep="\t",
     )
-    if var_names == "gene_symbols":
-        var_names_idx = pd.Index(genes[1].values)
+
+    # Handle features file with 1, 2, or 3 columns
+    if genes.shape[1] == 1:
+        # Case: Only one column is provided, assume it's gene symbols
+        var_names_idx = pd.Index(genes[0].values)
         if make_unique:
             var_names_idx = anndata.utils.make_index_unique(var_names_idx)
         adata.var_names = var_names_idx
-        adata.var["gene_ids"] = genes[0].values
-    elif var_names == "gene_ids":
-        adata.var_names = genes[0].values
-        adata.var["gene_symbols"] = genes[1].values
+        adata.var["gene_ids"] = genes[0].values  # Use the same for gene_ids
     else:
-        msg = "`var_names` needs to be 'gene_symbols' or 'gene_ids'"
-        raise ValueError(msg)
-    if not is_legacy:
-        adata.var["feature_types"] = genes[2].values
+        # Case: 2 or 3 columns, standard 10x format
+        if var_names == "gene_symbols":
+            var_names_idx = pd.Index(genes[1].values)
+            if make_unique:
+                var_names_idx = anndata.utils.make_index_unique(var_names_idx)
+            adata.var_names = var_names_idx
+            adata.var["gene_ids"] = genes[0].values
+        elif var_names == "gene_ids":
+            adata.var_names = genes[0].values
+            adata.var["gene_symbols"] = genes[1].values
+        else:
+            msg = "`var_names` needs to be 'gene_symbols' or 'gene_ids'"
+            raise ValueError(msg)
+
+        if not is_legacy and genes.shape[1] >= 3:
+            adata.var["feature_types"] = genes[2].values
+
     barcodes = pd.read_csv(path / f"{prefix}barcodes.tsv{suffix}", header=None)
     adata.obs_names = barcodes[0].values
     return adata
@@ -648,14 +638,13 @@ def _read_10x_mtx(
 
 @old_positionals("ext", "compression", "compression_opts")
 def write(
-    filename: PathLike[str] | str,
+    filename: Path | str,
     adata: AnnData,
     *,
-    ext: AnnDataFileFormat | Literal["csv"] | None = None,
-    convert_strings_to_categoricals: bool = True,
+    ext: Literal["h5", "csv", "txt", "npz"] | None = None,
     compression: Literal["gzip", "lzf"] | None = "gzip",
     compression_opts: int | None = None,
-) -> None:
+):
     """Write :class:`~anndata.AnnData` objects to file.
 
     Parameters
@@ -668,11 +657,8 @@ def write(
     adata
         Annotated data matrix.
     ext
-        File extension from which to infer file format.
-        If `None`, defaults to `sc.settings.file_format_data`.
-    convert_strings_to_categoricals
-        If anndata supports it, setting this to `False` will avoid
-        converting string columns to categorical arrays when writing.
+        File extension from wich to infer file format. If `None`, defaults to
+        `sc.settings.file_format_data`.
     compression
         See https://docs.h5py.org/en/latest/high/dataset.html.
     compression_opts
@@ -680,64 +666,26 @@ def write(
 
     """
     filename = Path(filename)  # allow passing strings
-    valid_exts = cast(
-        "set[Literal['csv'] | AnnDataFileFormat]", {"csv", *get_args(AnnDataFileFormat)}
-    )
-    if filename.suffix and (ext_from_name := filename.suffix[1:]) in valid_exts:
+    if is_valid_filename(filename):
+        ext_ = is_valid_filename(filename, return_ext=True)
         if ext is None:
-            ext = ext_from_name
-        elif ext != ext_from_name:
+            ext = ext_
+        elif ext != ext_:
             msg = (
                 "It suffices to provide the file type by "
                 "providing a proper extension to the filename."
-                f"One of {valid_exts}."
+                'One of "txt", "csv", "h5" or "npz".'
             )
             raise ValueError(msg)
     else:
         key = filename
         ext = settings.file_format_data if ext is None else ext
         filename = _get_filename_from_key(key, ext)
-
     if ext == "csv":
-        msg = (
-            "'csv' is not a good choice for anything, especially storing AnnData, "
-            "and will be removed from this function. Use 'h5ad' or 'zarr' instead."
-        )
-        warn(msg, FutureWarning)
         adata.write_csvs(filename)
-        return
-    elif ext not in {"h5ad", "h5", "zarr"}:
-        msg = f"Unknown file format: {ext} (not in {valid_exts})"
-        raise ValueError(msg)
-
-    if pkg_version("anndata") >= Version("0.11.0rc2"):
-        from anndata.io import write_h5ad, write_zarr
-
-        extra_kw = dict(convert_strings_to_categoricals=convert_strings_to_categoricals)
     else:
-        if not convert_strings_to_categoricals:
-            msg = (
-                "convert_strings_to_categoricals=False is not supported in anndata<0.11"
-            )
-            raise RuntimeError(msg)
-
-        def write_h5ad(filename: PathLike[str] | str, adata: AnnData, **kw) -> None:
-            adata.write_h5ad(filename, **kw)
-
-        def write_zarr(filename: PathLike[str] | str, adata: AnnData, **kw) -> None:
-            adata.write_zarr(filename, **kw)
-
-        extra_kw = {}
-
-    if ext == "zarr":
-        write_zarr(filename, adata, **extra_kw)
-    else:
-        write_h5ad(
-            filename,
-            adata,
-            **extra_kw,
-            compression=compression,
-            compression_opts=compression_opts,
+        adata.write(
+            filename, compression=compression, compression_opts=compression_opts
         )
 
 
@@ -748,7 +696,7 @@ def write(
 
 @old_positionals("as_header")
 def read_params(
-    filename: PathLike[str] | str, *, as_header: bool = False
+    filename: Path | str, *, as_header: bool = False
 ) -> dict[str, int | float | bool | str | None]:
     """Read parameter dictionary from text file.
 
@@ -775,10 +723,8 @@ def read_params(
     from collections import OrderedDict
 
     params = OrderedDict([])
-    with filename.open() as f:
-        for line_raw in f:
-            if "=" not in line_raw or (as_header and not line_raw.startswith("#")):
-                continue
+    for line_raw in filename.open():
+        if "=" in line_raw and (not as_header or line_raw.startswith("#")):
             line = line_raw[1:] if line_raw.startswith("#") else line_raw
             key, val = line.split("=")
             key = key.strip()
@@ -787,7 +733,7 @@ def read_params(
     return params
 
 
-def write_params(path: PathLike[str] | str, *args, **maps):
+def write_params(path: Path | str, *args, **maps):
     """Write parameters to file, so that it's readable by read_params.
 
     Uses INI file format.
@@ -839,11 +785,6 @@ def _read(  # noqa: PLR0912, PLR0915
         else:
             logg.debug(f"reading sheet {sheet} from file {filename}")
             return read_hdf(filename, sheet)
-    if ext == "zarr":
-        if sheet is not None:
-            msg = "Cannot read a specific sheet from a zarr file."
-            raise TypeError(msg)
-        return read_zarr(filename)
     # read other file types
     path_cache: Path = settings.cachedir / _slugify(filename).replace(
         f".{ext}", ".h5ad"
@@ -921,7 +862,7 @@ def _slugify(path: str | PurePath) -> str:
     return filename
 
 
-def _read_softgz(filename: str | bytes | Path | IO[bytes]) -> AnnData:
+def _read_softgz(filename: str | bytes | Path | BinaryIO) -> AnnData:
     """Read a SOFT format data file.
 
     The SOFT format is documented here
@@ -1050,7 +991,7 @@ def get_used_files():
             filenames.extend(nt.path for nt in flist)
         # This catches a race condition where a process ends
         # before we can examine its files
-        except psutil.NoSuchProcess:
+        except psutil.NoSuchProcess:  # noqa: PERF203
             pass
     return set(filenames)
 
@@ -1082,7 +1023,7 @@ def _download(url: str, path: Path):
             try:
                 from certifi import where
             except ImportError as e:
-                e.add_note(f"{msg} Please install `certifi` and try again.")
+                add_note(e, f"{msg} Please install `certifi` and try again.")
                 raise
             else:
                 logg.warning(f"{msg} Trying to use certifi.")
@@ -1144,8 +1085,6 @@ def is_valid_filename(
 def is_valid_filename(
     filename: Path, *, return_ext: Literal[True], ext: str | None = None
 ) -> str: ...
-
-
 def is_valid_filename(
     filename: Path, *, return_ext: bool = False, ext: str | None = None
 ) -> str | bool:
